@@ -61,9 +61,15 @@ ollama_client = OpenAI(
 )
 
 # ── Fallback: Groq (cloud) ──
-# NOTE: llama-3.3-70b-versatile was deprecated by Groq on 2026-08-16.
-# Current recommendation: openai/gpt-oss-120b or qwen/qwen3.6-27b
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+# NOTE: llama-3.3-70b-versatile was retired by Groq on 2026-08-16.
+# gpt-oss-* models are reasoning models that return empty content on short budgets.
+# qwen/qwen3.6-27b is non-reasoning → fastest + most reliable free choice.
+GROQ_MODELS = [
+    os.environ.get("GROQ_MODEL", "qwen/qwen3.6-27b"),
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+]
+GROQ_MODEL = GROQ_MODELS[0]
 groq_client = OpenAI(
     api_key=os.environ.get("GROQ_API_KEY", "missing"),
     base_url="https://api.groq.com/openai/v1",
@@ -605,13 +611,15 @@ def _build_user_prompt(ticker, price_info):
 
 
 def _openai_style_call(client, model_name, messages, json_mode=True,
-                       timeout=90, reasoning_effort=None):
+                       timeout=90, reasoning_effort=None,
+                       use_max_completion_tokens=False):
     """
     Call an OpenAI-compatible chat completions endpoint.
 
     - json_mode: tries response_format={"type":"json_object"}, retries without it on error
-    - reasoning_effort: pass "none" to disable thinking on models that support it
-      (Qwen 3.5 via Ollama accepts this; without it, responses take 15s+ and burn tokens)
+    - reasoning_effort: only sent when explicitly provided (Groq reasoning models need it)
+    - use_max_completion_tokens: send max_completion_tokens instead of max_tokens
+      (required for reasoning models — max_tokens cuts them off before they answer)
     """
     kwargs = {
         "model": model_name,
@@ -621,18 +629,24 @@ def _openai_style_call(client, model_name, messages, json_mode=True,
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
     if reasoning_effort:
-        # Send via extra_body so the OpenAI SDK doesn't strip it
-        kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
+        # Groq expects reasoning_effort as a top-level parameter
+        kwargs["reasoning_effort"] = reasoning_effort
+    if use_max_completion_tokens:
+        kwargs["max_completion_tokens"] = 1024
 
     try:
         resp = client.chat.completions.create(**kwargs)
         return resp.choices[0].message.content
     except Exception as e:
+        # If JSON mode isn't supported by this model, retry without it
         if json_mode:
             print(f"[LLM] JSON mode failed for {model_name}: {e}. Retrying without it...")
             kwargs.pop("response_format", None)
-            resp = client.chat.completions.create(**kwargs)
-            return resp.choices[0].message.content
+            try:
+                resp = client.chat.completions.create(**kwargs)
+                return resp.choices[0].message.content
+            except Exception as e2:
+                raise e2
         raise
 
 
@@ -641,7 +655,7 @@ def _call_llm(ai_model, ticker, price_info):
     Get a prediction from an LLM with automatic failover.
 
     Primary:  Ollama (local or Colab via ngrok) — free, private, no rate limits
-    Fallback: Groq (cloud)                      — free tier, 14,400 req/day
+    Fallback: Groq (cloud)                      — free tier, multiple model options
     """
     user_prompt = _build_user_prompt(ticker, price_info)
     messages = [
@@ -649,36 +663,39 @@ def _call_llm(ai_model, ticker, price_info):
         {'role': 'user', 'content': user_prompt},
     ]
 
-    # Order of preference — first success wins
     engines = [
         (
             "Ollama",
             lambda: _openai_style_call(
                 ollama_client, OLLAMA_MODEL, messages,
-                json_mode=False,           # Ollama's OpenAI shim can be picky about response_format
-                reasoning_effort="none",   # <-- the important fix: kills the "thinking" phase
+                json_mode=False,
+                reasoning_effort="none",
                 timeout=120,
             ),
         ),
-        (
-            "Groq",
-            lambda: _openai_style_call(
-                groq_client, GROQ_MODEL, messages,
+    ]
+
+    # Add each Groq model as its own engine so we can fail through them
+    for gmodel in GROQ_MODELS:
+        engines.append((
+            f"Groq ({gmodel})",
+            (lambda m=gmodel: _openai_style_call(
+                groq_client, m, messages,
                 json_mode=True,
                 timeout=45,
-            ),
-        ),
-    ]
+            )),
+        ))
 
     last_exception = None
     for name, call in engines:
         try:
             print(f"[LLM] Trying {name}...")
             result = call()
-            if result:
+            if result and str(result).strip():
                 print(f"[LLM] ✓ {name} responded.")
                 return result
             print(f"[LLM] {name} returned empty response.")
+            last_exception = RuntimeError(f"{name} returned empty content")
         except Exception as e:
             print(f"[LLM] ✗ {name} failed: {type(e).__name__}: {e}")
             last_exception = e
@@ -718,26 +735,33 @@ def predict_ai():
         return jsonify({'error': f'API Error: {e}'}), 502
 
     # ── Parse structured response (with fallbacks) ──
-    parsed    = parse_llm_json(raw) or {}
-    analysis  = parsed.get('analysis') or raw
-    verdict   = parsed.get('verdict')
+    parsed   = parse_llm_json(raw) or {}
+    analysis = parsed.get('analysis') or raw
+    verdict  = parsed.get('verdict')
 
     if verdict not in ('bull', 'bear', 'hold'):
         verdict = detect_direction(analysis)
 
+    # Confidence — must be OUTSIDE the except block, otherwise the
+    # endpoint returns None on success and Flask responds with 500.
+    confidence = None
     try:
         confidence = int(parsed.get('confidence'))
         confidence = max(0, min(100, confidence))
     except (TypeError, ValueError):
         confidence = None
 
-        return jsonify({
+    # Extract optional list fields
+    key_points = parsed.get('key_points')
+    risks      = parsed.get('risks')
+
+    return jsonify({
         'prediction': analysis,
         'verdict': verdict,
         'confidence': confidence,
         'headline':   parsed.get('headline') or None,
-        'key_points': parsed.get('key_points') if isinstance(parsed.get('key_points'), list) else None,
-        'risks':      parsed.get('risks') if isinstance(parsed.get('risks'), list) else None,
+        'key_points': key_points if isinstance(key_points, list) else None,
+        'risks':      risks if isinstance(risks, list) else None,
     })
 
 
@@ -786,29 +810,33 @@ def health_llm():
     except Exception as e:
         results['ollama'] = {'ok': False, 'host': OLLAMA_HOST, 'error': str(e)}
 
-    # ── Groq: real 1-token test call ──
+    # ── Groq: test each configured model with a real call ──
     key = os.environ.get('GROQ_API_KEY', '')
     if not key or key == 'missing':
-        results['groq'] = {'ok': False, 'model_configured': GROQ_MODEL, 'error': 'GROQ_API_KEY not set'}
+        results['groq'] = {'ok': False, 'error': 'GROQ_API_KEY not set'}
     else:
-        try:
-            resp = groq_client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[{'role': 'user', 'content': 'ping'}],
-                max_tokens=3,
-                timeout=10,
-            )
-            results['groq'] = {
-                'ok': True,
-                'model_configured': GROQ_MODEL,
-                'reply': (resp.choices[0].message.content or '').strip()[:40],
-            }
-        except Exception as e:
-            results['groq'] = {
-                'ok': False,
-                'model_configured': GROQ_MODEL,
-                'error': f'{type(e).__name__}: {e}',
-            }
+        groq_status = {'ok': False, 'models': {}}
+        for gmodel in GROQ_MODELS:
+            try:
+                resp = groq_client.chat.completions.create(
+                    model=gmodel,
+                    messages=[{'role': 'user', 'content': 'Reply with only: pong'}],
+                    max_completion_tokens=20,
+                    timeout=15,
+                )
+                text = (resp.choices[0].message.content or '').strip()
+                groq_status['models'][gmodel] = {
+                    'ok': bool(text),
+                    'reply': text[:40] if text else '(empty)',
+                }
+                if text:
+                    groq_status['ok'] = True
+            except Exception as e:
+                groq_status['models'][gmodel] = {
+                    'ok': False,
+                    'error': f'{type(e).__name__}: {str(e)[:120]}',
+                }
+        results['groq'] = groq_status
 
     return jsonify(results)
 
@@ -817,6 +845,7 @@ if __name__ == '__main__':
     print("─" * 60)
     print(f"  Ollama host  : {OLLAMA_HOST}")
     print(f"  Ollama model : {OLLAMA_MODEL}")
-    print(f"  Groq model   : {GROQ_MODEL}  (fallback)")
+    print(f"  Groq primary : {GROQ_MODEL}")
+    print(f"  Groq backups : {', '.join(GROQ_MODELS[1:])}")
     print("─" * 60)
     app.run(debug=True, port=5000)
