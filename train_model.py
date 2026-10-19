@@ -1,18 +1,14 @@
-import yfinance as yf
-import pandas as pd
-import numpy as np
+import io
 import pickle
 import time
+
+import pandas as pd
 import requests
-import io
-from xgboost import XGBClassifier
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
+from xgboost import XGBClassifier
+import yfinance as yf
 
-
-# ═══════════════════════════════════════════════════════════
-# CONFIG
-# ═══════════════════════════════════════════════════════════
 PERIOD = '5y'
 MIN_ROWS = 200
 FORWARD_DAYS = 1
@@ -25,7 +21,7 @@ USER_AGENT = (
     'Chrome/120.0.0.0 Safari/537.36'
 )
 
-# Fallback list (top ~110 liquid tickers) used if Wikipedia is unreachable
+# Fallback list of top liquid tickers if Wikipedia is unreachable
 FALLBACK_TICKERS = [
     'AAPL','MSFT','NVDA','AMZN','GOOGL','META','TSLA','BRK-B','UNH','XOM',
     'LLY','JPM','JNJ','V','PG','MA','AVGO','HD','MRK','COST','ABBV','CVX',
@@ -41,9 +37,6 @@ FALLBACK_TICKERS = [
 FEATURE_COLS = ['Close', 'SMA_20', 'SMA_50', 'Volume', 'Daily_Return', 'RSI']
 
 
-# ═══════════════════════════════════════════════════════════
-# FEATURE ENGINEERING
-# ═══════════════════════════════════════════════════════════
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = delta.where(delta > 0, 0).rolling(window=period).mean()
@@ -53,7 +46,6 @@ def calculate_rsi(series, period=14):
 
 
 def make_features(df):
-    """Same feature engineering as the live /predict/xgboost endpoint."""
     df = df.copy()
     df['SMA_20'] = df['Close'].rolling(20).mean()
     df['SMA_50'] = df['Close'].rolling(50).mean()
@@ -64,9 +56,6 @@ def make_features(df):
     return df.dropna()
 
 
-# ═══════════════════════════════════════════════════════════
-# TICKER LIST
-# ═══════════════════════════════════════════════════════════
 def fetch_all_tickers():
     print('Fetching S&P 500 ticker list...')
     url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
@@ -86,41 +75,38 @@ def fetch_all_tickers():
         return FALLBACK_TICKERS
 
 
-# ═══════════════════════════════════════════════════════════
-# DATA DOWNLOAD
-# ═══════════════════════════════════════════════════════════
 def download_and_process(tickers):
     frames = []
     failed = []
     total = len(tickers)
-    t_start = time.time()
+    start_time = time.time()
 
-    for i, t in enumerate(tickers, 1):
+    for i, ticker in enumerate(tickers, 1):
         try:
-            df = yf.Ticker(t).history(period=PERIOD)
+            df = yf.Ticker(ticker).history(period=PERIOD)
             if df is None or len(df) < MIN_ROWS:
-                failed.append((t, 'too short'))
+                failed.append((ticker, 'too short'))
                 continue
 
             df = make_features(df)
             if len(df) < MIN_ROWS:
-                failed.append((t, 'too short after dropna'))
+                failed.append((ticker, 'too short after dropna'))
                 continue
 
-            df['ticker'] = t
+            df['ticker'] = ticker
             frames.append(df[FEATURE_COLS + ['Target']])
 
             if i % 25 == 0:
                 rows_so_far = sum(len(f) for f in frames)
-                elapsed = time.time() - t_start
+                elapsed = time.time() - start_time
                 eta = (elapsed / i) * (total - i)
-                print(f'  [{i}/{total}] {t:6s} ok — {rows_so_far:>7,} rows total '
+                print(f'  [{i}/{total}] {ticker:6s} ok — {rows_so_far:>7,} rows total '
                       f'({elapsed:.0f}s elapsed, ~{eta:.0f}s left)')
 
-            time.sleep(0.05)   # be nice to Yahoo
+            time.sleep(0.05)
 
         except Exception as e:
-            failed.append((t, str(e)[:60]))
+            failed.append((ticker, str(e)[:60]))
 
     print(f'\nDownloaded {len(frames)} tickers. Skipped {len(failed)}.')
     if failed:
@@ -132,9 +118,6 @@ def download_and_process(tickers):
     return pd.concat(frames, ignore_index=True)
 
 
-# ═══════════════════════════════════════════════════════════
-# TRAINING
-# ═══════════════════════════════════════════════════════════
 def train(combined):
     X = combined[FEATURE_COLS]
     y = combined['Target']
@@ -163,9 +146,9 @@ def train(combined):
     )
 
     print('\nTraining XGBoost...')
-    t0 = time.time()
+    start_time = time.time()
     model.fit(X_train, y_train)
-    print(f'Training finished in {time.time() - t0:.1f}s')
+    print(f'Training finished in {time.time() - start_time:.1f}s')
 
     preds = model.predict(X_test)
     acc = accuracy_score(y_test, preds)
@@ -179,11 +162,8 @@ def train(combined):
     return model
 
 
-# ═══════════════════════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════════════════════
 if __name__ == '__main__':
-    t0 = time.time()
+    total_start = time.time()
 
     tickers = fetch_all_tickers()
     print(f'\nTraining on {len(tickers)} tickers...')
@@ -198,5 +178,5 @@ if __name__ == '__main__':
         pickle.dump(model, f)
     print(f'Saved model → {OUTPUT_MODEL}')
 
-    print(f'\nTotal elapsed: {time.time() - t0:.0f}s')
+    print(f'\nTotal elapsed: {time.time() - total_start:.0f}s')
     print('Restart Flask to pick up the new model.')

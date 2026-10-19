@@ -1,69 +1,57 @@
-from flask import Flask, request, jsonify, render_template, session, redirect, url_for
-import pandas as pd
-import numpy as np
-import pickle
-import requests
-import io
-import os
-import json
-import uuid
-import re
 import functools
+import io
+import json
+import os
+import pickle
+import re
 import threading
-import yfinance as yf
-from dotenv import load_dotenv
-from openai import OpenAI
+import uuid
+import xml.etree.ElementTree as ET
 
+from dotenv import load_dotenv
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+import numpy as np
+from openai import OpenAI
+import pandas as pd
+import requests
+import yfinance as yf
 
 load_dotenv()
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "prophet_dev_secret_change_me")
+
 HISTORY_FILE = 'history.json'
 USERS_FILE = 'users.json'
 FEATURE_ORDER = ['Close', 'SMA_20', 'SMA_50', 'Volume', 'Daily_Return', 'RSI']
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "prophet_dev_secret_change_me")
 
 _lock = threading.RLock()
 
-
-# ═══════════════════════════════════════════════════════════
-# MODEL LOAD
-# ═══════════════════════════════════════════════════════════
 try:
     with open('xgboost_model.pkl', 'rb') as f:
         model = pickle.load(f)
-except Exception as e:
+except (FileNotFoundError, pickle.PickleError, Exception) as e:
     print(f"[WARN] Failed to load XGBoost model: {e}")
     model = None
 
-
-# ═══════════════════════════════════════════════════════════
-# LLM CLIENTS
-# ═══════════════════════════════════════════════════════════
-# ── Primary: Ollama (local or Colab via ngrok) ──
-OLLAMA_HOST  = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get(
     "OLLAMA_MODEL",
     "hf.co/HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive:Q4_K_M",
 )
 
-# Headers required for free ngrok tunnels — otherwise ngrok returns an HTML
-# warning page instead of JSON, and the OpenAI SDK chokes on it.
+# Headers required for ngrok tunnels to bypass HTML interstitial warnings
 _NGROK_HEADERS = {
     "ngrok-skip-browser-warning": "true",
     "User-Agent": "Prophet-Flask-App",
 }
 
 ollama_client = OpenAI(
-    api_key="ollama",                       # any non-empty string works
+    api_key="ollama",
     base_url=f"{OLLAMA_HOST}/v1",
     default_headers=_NGROK_HEADERS,
 )
 
-# ── Fallback: Groq (cloud) ──
-# NOTE: llama-3.3-70b-versatile was retired by Groq on 2026-08-16.
-# gpt-oss-* models are reasoning models that return empty content on short budgets.
-# qwen/qwen3.6-27b is non-reasoning → fastest + most reliable free choice.
 GROQ_MODELS = [
     os.environ.get("GROQ_MODEL", "qwen/qwen3.6-27b"),
     "openai/gpt-oss-20b",
@@ -76,9 +64,6 @@ groq_client = OpenAI(
 )
 
 
-# ═══════════════════════════════════════════════════════════
-# JSON STORAGE HELPERS (atomic, locked)
-# ═══════════════════════════════════════════════════════════
 def _load_json(path, default):
     with _lock:
         if os.path.exists(path):
@@ -86,7 +71,7 @@ def _load_json(path, default):
                 with open(path, 'r') as f:
                     data = json.load(f)
                     return data if isinstance(data, type(default)) else default
-            except Exception:
+            except (json.JSONDecodeError, OSError):
                 return default
         return default
 
@@ -115,9 +100,6 @@ def save_users(data):
     _save_json(USERS_FILE, data)
 
 
-# ═══════════════════════════════════════════════════════════
-# USER MANAGEMENT
-# ═══════════════════════════════════════════════════════════
 def _now_iso():
     return pd.Timestamp.utcnow().isoformat() + 'Z'
 
@@ -147,9 +129,6 @@ def get_or_create_user(email):
         return users[email]
 
 
-# ═══════════════════════════════════════════════════════════
-# AUTH
-# ═══════════════════════════════════════════════════════════
 def login_required(f):
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
@@ -161,9 +140,6 @@ def login_required(f):
     return wrapper
 
 
-# ═══════════════════════════════════════════════════════════
-# UTILITIES
-# ═══════════════════════════════════════════════════════════
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = delta.where(delta > 0, 0).rolling(window=period).mean()
@@ -175,32 +151,27 @@ def calculate_rsi(series, period=14):
 def detect_direction(text):
     if not text:
         return 'hold'
-    t = text.lower()
-    up = len(re.findall(r'\b(bullish|buy|up|upside|increase|long|positive|rise|rising|gain|outperform|entry)\b', t))
-    down = len(re.findall(r'\b(bearish|sell|down|downside|decrease|short|negative|fall|falling|drop|loss|underperform|corrected)\b', t))
-    if up > down:
+    text_lower = text.lower()
+    bullish = len(re.findall(r'\b(bullish|buy|up|upside|increase|long|positive|rise|rising|gain|outperform|entry)\b', text_lower))
+    bearish = len(re.findall(r'\b(bearish|sell|down|downside|decrease|short|negative|fall|falling|drop|loss|underperform|corrected)\b', text_lower))
+    if bullish > bearish:
         return 'bull'
-    if down > up:
+    if bearish > bullish:
         return 'bear'
     return 'hold'
 
 
 def parse_llm_json(text):
-    """Extract JSON from LLM output, tolerant of markdown fences and stray text."""
     if not text:
         return None
-    m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(1))
-        except Exception:
-            pass
-    m = re.search(r'\{.*\}', text, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            pass
+    patterns = [r'```(?:json)?\s*(\{.*?\})\s*```', r'\{.*\}']
+    for pattern in patterns:
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1 if match.lastindex else 0))
+            except json.JSONDecodeError:
+                continue
     return None
 
 
@@ -211,43 +182,38 @@ def compute_feature_contributions(df):
     try:
         import shap
         explainer = shap.TreeExplainer(model)
-        vals = explainer.shap_values(df)
-        arr = np.array(vals).reshape(-1)
-        max_abs = float(np.max(np.abs(arr))) or 1.0
+        shap_values = np.array(explainer.shap_values(df)).reshape(-1)
+        max_abs = float(np.max(np.abs(shap_values))) or 1.0
         return [
             {'name': n, 'value': float(row[n]), 'contribution': float(v) / max_abs}
-            for n, v in zip(names, arr)
+            for n, v in zip(names, shap_values)
         ]
     except Exception:
         pass
 
-    importances = np.array(
-        getattr(model, 'feature_importances_', np.ones(len(names)) / len(names))
-    )
-    devs = []
+    importances = np.array(getattr(model, 'feature_importances_', np.ones(len(names)) / len(names)))
+    deviations = []
     for n in names:
-        v = float(row[n])
+        val = float(row[n])
         if n == 'RSI':
-            devs.append((v - 50) / 30)
+            deviations.append((val - 50) / 30)
         elif n == 'Volume':
-            devs.append((np.log10(max(v, 1)) - 7) / 3)
+            deviations.append((np.log10(max(val, 1)) - 7) / 3)
         elif n == 'Daily_Return':
-            devs.append(v / 0.03)
+            deviations.append(val / 0.03)
         elif n in ('SMA_20', 'SMA_50'):
-            devs.append((float(row['Close']) - v) / max(v, 1e-6) * 5)
+            deviations.append((float(row['Close']) - val) / max(val, 1e-6) * 5)
         else:
-            devs.append(0.0)
-    contribs = importances * np.array(devs)
-    max_abs = float(np.max(np.abs(contribs))) or 1.0
+            deviations.append(0.0)
+
+    contributions = importances * np.array(deviations)
+    max_abs = float(np.max(np.abs(contributions))) or 1.0
     return [
         {'name': n, 'value': float(row[n]), 'contribution': float(c) / max_abs}
-        for n, c in zip(names, contribs)
+        for n, c in zip(names, contributions)
     ]
 
 
-# ═══════════════════════════════════════════════════════════
-# AUTH ROUTES
-# ═══════════════════════════════════════════════════════════
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -265,9 +231,6 @@ def logout():
     return redirect(url_for('login'))
 
 
-# ═══════════════════════════════════════════════════════════
-# PAGES
-# ═══════════════════════════════════════════════════════════
 @app.route('/')
 @login_required
 def home():
@@ -286,9 +249,25 @@ def profile():
     return render_template('profile.html')
 
 
-# ═══════════════════════════════════════════════════════════
-# PROFILE API
-# ═══════════════════════════════════════════════════════════
+@app.route('/data/<entry_id>')
+@login_required
+def data_page(entry_id):
+    email = session['user']
+    with _lock:
+        history_list = load_history()
+
+    entry = next(
+        (e for e in history_list
+         if str(e.get('id')) == str(entry_id)
+         and e.get('user_email') == email),
+        None
+    )
+    if not entry:
+        return render_template('data.html', entry={'error': 'not found'}), 404
+
+    return render_template('data.html', entry=entry)
+
+
 @app.route('/api/profile', methods=['GET', 'PATCH'])
 @login_required
 def api_profile():
@@ -311,14 +290,10 @@ def api_profile():
     return jsonify(get_or_create_user(email))
 
 
-# ═══════════════════════════════════════════════════════════
-# WATCHLIST API
-# ═══════════════════════════════════════════════════════════
 @app.route('/api/watchlist', methods=['GET', 'POST'])
 @login_required
 def api_watchlist():
     email = session['user']
-    get_or_create_user(email)
 
     if request.method == 'POST':
         payload = request.get_json(silent=True) or {}
@@ -327,19 +302,15 @@ def api_watchlist():
             return jsonify({'error': 'ticker required'}), 400
         with _lock:
             users = load_users()
-            user = users.get(email, {})
-            watchlist = user.get('watchlist', [])
+            user = users.setdefault(email, get_or_create_user(email))
+            watchlist = user.setdefault('watchlist', [])
             if ticker not in watchlist:
                 watchlist.append(ticker)
-                user['watchlist'] = watchlist
-                users[email] = user
                 save_users(users)
             return jsonify({'success': True, 'watchlist': watchlist, 'added': ticker})
 
-    with _lock:
-        users = load_users()
-        watchlist = users.get(email, {}).get('watchlist', [])
-    return jsonify({'watchlist': watchlist})
+    user = get_or_create_user(email)
+    return jsonify({'watchlist': user.get('watchlist', [])})
 
 
 @app.route('/api/watchlist/<ticker>', methods=['DELETE'])
@@ -357,9 +328,6 @@ def api_watchlist_delete(ticker):
         return jsonify({'success': True, 'watchlist': user['watchlist']})
 
 
-# ═══════════════════════════════════════════════════════════
-# HISTORY API (per-user)
-# ═══════════════════════════════════════════════════════════
 @app.route('/api/history', methods=['GET', 'POST'])
 @login_required
 def api_history():
@@ -377,9 +345,9 @@ def api_history():
         return jsonify({'success': True, 'id': new_entry['id']})
 
     with _lock:
-        all_history = load_history()
-    filtered = [e for e in all_history if e.get('user_email') == email]
-    return jsonify(filtered)
+        history_data = load_history()
+    user_history = [e for e in history_data if e.get('user_email') == email]
+    return jsonify(user_history)
 
 
 @app.route('/api/history/<entry_id>', methods=['DELETE'])
@@ -388,12 +356,12 @@ def delete_history_entry(entry_id):
     email = session['user']
     with _lock:
         history_data = load_history()
-        before = len(history_data)
+        before_count = len(history_data)
         history_data = [
             e for e in history_data
             if not (e.get('id') == entry_id and e.get('user_email') == email)
         ]
-        if len(history_data) == before:
+        if len(history_data) == before_count:
             return jsonify({'error': 'Entry not found'}), 404
         save_history(history_data)
     return jsonify({'success': True})
@@ -411,12 +379,12 @@ def bulk_delete_history():
     id_set = set(str(i) for i in ids)
     with _lock:
         history_data = load_history()
-        before = len(history_data)
+        before_count = len(history_data)
         history_data = [
             e for e in history_data
             if not (e.get('id') in id_set and e.get('user_email') == email)
         ]
-        removed = before - len(history_data)
+        removed = before_count - len(history_data)
         save_history(history_data)
     return jsonify({'success': True, 'removed': removed, 'total': len(history_data)})
 
@@ -439,9 +407,6 @@ def update_history_entry(entry_id):
     return jsonify({'error': 'Entry not found'}), 404
 
 
-# ═══════════════════════════════════════════════════════════
-# TICKERS
-# ═══════════════════════════════════════════════════════════
 @app.route('/tickers', methods=['GET'])
 def get_tickers():
     url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
@@ -455,63 +420,57 @@ def get_tickers():
         return jsonify({'error': str(e)}), 500
 
 
-# ═══════════════════════════════════════════════════════════
-# CHART DATA
-# ═══════════════════════════════════════════════════════════
 @app.route('/chart-data', methods=['POST'])
 @login_required
 def chart_data():
-    try:
-        ticker = (request.json or {}).get('ticker', '').upper().strip()
-        if not ticker:
-            return jsonify({'error': 'ticker required'}), 400
+    ticker = (request.get_json(silent=True) or {}).get('ticker', '').upper().strip()
+    if not ticker:
+        return jsonify({'error': 'ticker required'}), 400
 
+    try:
         hist = yf.Ticker(ticker).history(period='6mo')
         if hist.empty:
             return jsonify({'error': f'No data for {ticker}'}), 404
 
-        data = []
-        for idx, row in hist.iterrows():
-            data.append({
+        data = [
+            {
                 'time': idx.strftime('%Y-%m-%d'),
                 'open': float(row['Open']),
                 'high': float(row['High']),
                 'low': float(row['Low']),
                 'close': float(row['Close']),
                 'volume': float(row['Volume']) if 'Volume' in row and not pd.isna(row['Volume']) else 0,
-            })
+            }
+            for idx, row in hist.iterrows()
+        ]
         return jsonify({'data': data})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
-# ═══════════════════════════════════════════════════════════
-# NEWS
-# ═══════════════════════════════════════════════════════════
 @app.route('/news', methods=['POST'])
 @login_required
 def get_news():
-    import urllib.request
-    import xml.etree.ElementTree as ET
-    from urllib.parse import quote
+    ticker = (request.get_json(silent=True) or {}).get('ticker', '').upper().strip()
+    if not ticker:
+        return jsonify({'error': 'ticker required'}), 400
 
     try:
-        ticker = (request.json or {}).get('ticker', '').upper().strip()
-        if not ticker:
-            return jsonify({'error': 'ticker required'}), 400
-
-        query = quote(f'{ticker} stock')
-        url = f'https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en'
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        xml_data = urllib.request.urlopen(req, timeout=10).read()
-        root = ET.fromstring(xml_data)
+        resp = requests.get(
+            'https://news.google.com/rss/search',
+            params={'q': f'{ticker} stock', 'hl': 'en-US', 'gl': 'US', 'ceid': 'US:en'},
+            headers={'User-Agent': 'Mozilla/5.0'},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
 
         news = []
         for item in root.findall('.//channel/item')[:5]:
             source_node = item.find('source')
             news.append({
-                'title': item.find('title').text,
-                'link': item.find('link').text,
+                'title': item.findtext('title', ''),
+                'link': item.findtext('link', ''),
                 'publisher': source_node.text if source_node is not None else 'Google News',
             })
         return jsonify({'news': news})
@@ -519,19 +478,16 @@ def get_news():
         return jsonify({'error': str(e)}), 500
 
 
-# ═══════════════════════════════════════════════════════════
-# XGBOOST PREDICTION
-# ═══════════════════════════════════════════════════════════
 @app.route('/predict/xgboost', methods=['POST'])
 @login_required
 def predict_xgboost():
-    try:
-        ticker = (request.get_json() or {}).get('ticker', '').upper().strip()
-        if not ticker:
-            return jsonify({'error': 'ticker required'}), 400
-        if model is None:
-            return jsonify({'error': 'XGBoost model not loaded on server.'}), 500
+    ticker = (request.get_json(silent=True) or {}).get('ticker', '').upper().strip()
+    if not ticker:
+        return jsonify({'error': 'ticker required'}), 400
+    if model is None:
+        return jsonify({'error': 'XGBoost model not loaded on server.'}), 500
 
+    try:
         hist = yf.Ticker(ticker).history(period='3mo')
         if hist.empty:
             return jsonify({'error': f'No data available for {ticker}.'}), 404
@@ -555,32 +511,25 @@ def predict_xgboost():
         }])[FEATURE_ORDER]
 
         pred = int(model.predict(df)[0])
-
-        try:
+        if hasattr(model, 'predict_proba'):
             proba = model.predict_proba(df)[0]
             confidence = int(round(float(max(proba)) * 100))
-        except Exception:
+        else:
             confidence = 65
 
         verdict = 'bull' if pred == 1 else 'bear'
         direction = 'Up (Bullish)' if pred == 1 else 'Down (Bearish)'
-        text = f'XGBoost Technical Analysis: The trend is predicted to go {direction}.'
-
-        features = compute_feature_contributions(df)
 
         return jsonify({
-            'prediction': text,
+            'prediction': f'XGBoost Technical Analysis: The trend is predicted to go {direction}.',
             'verdict': verdict,
             'confidence': confidence,
-            'features': features,
+            'features': compute_feature_contributions(df),
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
-# ═══════════════════════════════════════════════════════════
-# AI PREDICTIONS
-# ═══════════════════════════════════════════════════════════
 SYSTEM_PROMPT = (
     "You are a stock market analyst. Reply with ONLY a valid JSON object. "
     "Do not include markdown, code fences, or any text outside the JSON.\n"
@@ -610,17 +559,7 @@ def _build_user_prompt(ticker, price_info):
     )
 
 
-def _openai_style_call(client, model_name, messages, json_mode=True,
-                       timeout=90, reasoning_effort=None,
-                       use_max_completion_tokens=False):
-    """
-    Call an OpenAI-compatible chat completions endpoint.
-
-    - json_mode: tries response_format={"type":"json_object"}, retries without it on error
-    - reasoning_effort: only sent when explicitly provided (Groq reasoning models need it)
-    - use_max_completion_tokens: send max_completion_tokens instead of max_tokens
-      (required for reasoning models — max_tokens cuts them off before they answer)
-    """
+def _openai_style_call(client, model_name, messages, json_mode=True, timeout=90, reasoning_effort=None):
     kwargs = {
         "model": model_name,
         "messages": messages,
@@ -629,164 +568,109 @@ def _openai_style_call(client, model_name, messages, json_mode=True,
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
     if reasoning_effort:
-        # Groq expects reasoning_effort as a top-level parameter
         kwargs["reasoning_effort"] = reasoning_effort
-    if use_max_completion_tokens:
-        kwargs["max_completion_tokens"] = 1024
 
     try:
         resp = client.chat.completions.create(**kwargs)
         return resp.choices[0].message.content
-    except Exception as e:
-        # If JSON mode isn't supported by this model, retry without it
+    except Exception:
         if json_mode:
-            print(f"[LLM] JSON mode failed for {model_name}: {e}. Retrying without it...")
             kwargs.pop("response_format", None)
-            try:
-                resp = client.chat.completions.create(**kwargs)
-                return resp.choices[0].message.content
-            except Exception as e2:
-                raise e2
+            resp = client.chat.completions.create(**kwargs)
+            return resp.choices[0].message.content
         raise
 
 
 def _call_llm(ai_model, ticker, price_info):
-    """
-    Get a prediction from an LLM with automatic failover.
-
-    Primary:  Ollama (local or Colab via ngrok) — free, private, no rate limits
-    Fallback: Groq (cloud)                      — free tier, multiple model options
-    """
     user_prompt = _build_user_prompt(ticker, price_info)
     messages = [
         {'role': 'system', 'content': SYSTEM_PROMPT},
         {'role': 'user', 'content': user_prompt},
     ]
 
-    engines = [
-        (
-            "Ollama",
-            lambda: _openai_style_call(
-                ollama_client, OLLAMA_MODEL, messages,
-                json_mode=False,
-                reasoning_effort="none",
-                timeout=120,
-            ),
-        ),
-    ]
+    ollama_call = ("Ollama", ollama_client, OLLAMA_MODEL, False, "none", 120)
+    groq_calls = [(f"Groq ({m})", groq_client, m, True, None, 45) for m in GROQ_MODELS]
 
-    # Add each Groq model as its own engine so we can fail through them
-    for gmodel in GROQ_MODELS:
-        engines.append((
-            f"Groq ({gmodel})",
-            (lambda m=gmodel: _openai_style_call(
-                groq_client, m, messages,
-                json_mode=True,
-                timeout=45,
-            )),
-        ))
+    calls = groq_calls + [ollama_call] if ai_model == 'groq' else [ollama_call] + groq_calls
 
-    last_exception = None
-    for name, call in engines:
+    last_error = None
+    for name, client, model_name, json_mode, reasoning_effort, timeout in calls:
         try:
-            print(f"[LLM] Trying {name}...")
-            result = call()
+            result = _openai_style_call(
+                client, model_name, messages,
+                json_mode=json_mode,
+                reasoning_effort=reasoning_effort,
+                timeout=timeout,
+            )
             if result and str(result).strip():
-                print(f"[LLM] ✓ {name} responded.")
                 return result
-            print(f"[LLM] {name} returned empty response.")
-            last_exception = RuntimeError(f"{name} returned empty content")
+            last_error = RuntimeError(f"{name} returned empty content")
         except Exception as e:
-            print(f"[LLM] ✗ {name} failed: {type(e).__name__}: {e}")
-            last_exception = e
+            last_error = e
 
-    raise RuntimeError(f"All LLM providers failed. Last error: {last_exception}")
+    raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
 
 
 @app.route('/predict/ai', methods=['POST'])
 @login_required
 def predict_ai():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     ticker = (data.get('ticker') or '').upper().strip()
     ai_model = data.get('model') or 'ollama'
 
     if not ticker:
         return jsonify({'error': 'ticker required'}), 400
 
-    # ── Price context for the prompt ──
+    price_info = ''
     try:
         hist = yf.Ticker(ticker).history(period='1mo')
         if not hist.empty:
             current_price = round(float(hist['Close'].iloc[-1]), 2)
-            past_price    = round(float(hist['Close'].iloc[0]), 2)
-            price_info = (
-                f'The current price is ${current_price}. '
-                f'One month ago, it was ${past_price}.'
-            )
-        else:
-            price_info = ''
+            past_price = round(float(hist['Close'].iloc[0]), 2)
+            price_info = f'The current price is ${current_price}. One month ago, it was ${past_price}.'
     except Exception:
-        price_info = ''
+        pass
 
-    # ── Ask the LLM chain ──
     try:
         raw = _call_llm(ai_model, ticker, price_info)
     except Exception as e:
         return jsonify({'error': f'API Error: {e}'}), 502
 
-    # ── Parse structured response (with fallbacks) ──
-    parsed   = parse_llm_json(raw) or {}
+    parsed = parse_llm_json(raw) or {}
     analysis = parsed.get('analysis') or raw
-    verdict  = parsed.get('verdict')
+    verdict = parsed.get('verdict')
 
     if verdict not in ('bull', 'bear', 'hold'):
         verdict = detect_direction(analysis)
 
-    # Confidence — must be OUTSIDE the except block, otherwise the
-    # endpoint returns None on success and Flask responds with 500.
-    confidence = None
-    try:
-        confidence = int(parsed.get('confidence'))
-        confidence = max(0, min(100, confidence))
-    except (TypeError, ValueError):
+    confidence = parsed.get('confidence')
+    if isinstance(confidence, (int, float)):
+        confidence = max(0, min(100, int(confidence)))
+    else:
         confidence = None
 
-    # Extract optional list fields
     key_points = parsed.get('key_points')
-    risks      = parsed.get('risks')
+    risks = parsed.get('risks')
 
     return jsonify({
         'prediction': analysis,
         'verdict': verdict,
         'confidence': confidence,
-        'headline':   parsed.get('headline') or None,
+        'headline': parsed.get('headline') or None,
         'key_points': key_points if isinstance(key_points, list) else None,
-        'risks':      risks if isinstance(risks, list) else None,
+        'risks': risks if isinstance(risks, list) else None,
     })
 
 
-# ═══════════════════════════════════════════════════════════
-# HEALTH CHECK
-# ═══════════════════════════════════════════════════════════
 @app.route('/health/llm', methods=['GET'])
 def health_llm():
-    """
-    Probe both LLM providers with real requests so you know what's actually working.
-    Ollama probe includes the ngrok header; otherwise it would always fail behind a tunnel.
-    """
     results = {}
 
-    # ── Ollama: check the server is reachable AND has our model ──
     try:
-        r = requests.get(
-            f"{OLLAMA_HOST}/api/tags",
-            headers=_NGROK_HEADERS,
-            timeout=5,
-        )
+        r = requests.get(f"{OLLAMA_HOST}/api/tags", headers=_NGROK_HEADERS, timeout=5)
         if r.status_code == 200:
             try:
-                tags = r.json()
-                models = [m.get('name', '') for m in tags.get('models', [])]
+                models = [m.get('name', '') for m in r.json().get('models', [])]
                 has_model = any(OLLAMA_MODEL in m for m in models)
                 results['ollama'] = {
                     'ok': has_model,
@@ -795,44 +679,35 @@ def health_llm():
                     'models_available': models,
                     'note': 'model present' if has_model else 'model NOT pulled on the server',
                 }
-            except Exception as e:
-                results['ollama'] = {
-                    'ok': False, 'host': OLLAMA_HOST,
-                    'error': f'Bad JSON response: {e}',
-                    'raw': r.text[:200],
-                }
+            except ValueError as e:
+                results['ollama'] = {'ok': False, 'host': OLLAMA_HOST, 'error': f'Bad JSON response: {e}'}
         else:
-            results['ollama'] = {
-                'ok': False, 'host': OLLAMA_HOST,
-                'status': r.status_code,
-                'raw': r.text[:200],
-            }
+            results['ollama'] = {'ok': False, 'host': OLLAMA_HOST, 'status': r.status_code}
     except Exception as e:
         results['ollama'] = {'ok': False, 'host': OLLAMA_HOST, 'error': str(e)}
 
-    # ── Groq: test each configured model with a real call ──
     key = os.environ.get('GROQ_API_KEY', '')
     if not key or key == 'missing':
         results['groq'] = {'ok': False, 'error': 'GROQ_API_KEY not set'}
     else:
         groq_status = {'ok': False, 'models': {}}
-        for gmodel in GROQ_MODELS:
+        for model_name in GROQ_MODELS:
             try:
                 resp = groq_client.chat.completions.create(
-                    model=gmodel,
+                    model=model_name,
                     messages=[{'role': 'user', 'content': 'Reply with only: pong'}],
                     max_completion_tokens=20,
                     timeout=15,
                 )
                 text = (resp.choices[0].message.content or '').strip()
-                groq_status['models'][gmodel] = {
+                groq_status['models'][model_name] = {
                     'ok': bool(text),
                     'reply': text[:40] if text else '(empty)',
                 }
                 if text:
                     groq_status['ok'] = True
             except Exception as e:
-                groq_status['models'][gmodel] = {
+                groq_status['models'][model_name] = {
                     'ok': False,
                     'error': f'{type(e).__name__}: {str(e)[:120]}',
                 }

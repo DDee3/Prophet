@@ -122,7 +122,7 @@ a { color: inherit; }
 .blob.b2 { width: 52vw; height: 52vw; top: 14vh; right: -18vw; background: radial-gradient(circle at 60% 40%, var(--blob-2), transparent 70%); animation: drift-b 44s cubic-bezier(.45,0,.55,1) infinite; }
 .blob.b3 { width: 66vw; height: 66vw; bottom: -30vw; left: 14vw; background: radial-gradient(circle at 50% 50%, var(--blob-3), transparent 72%); animation: drift-c 52s cubic-bezier(.45,0,.55,1) infinite; }
 @keyframes drift-a { 0%,100% { transform: translate3d(0,0,0) scale(1); } 33% { transform: translate3d(9vw, 7vh, 0) scale(1.14); } 66% { transform: translate3d(-6vw, 13vh, 0) scale(.92); } }
-@keyframes drift-b { 0%,100% { transform: translate3d(0,0,0) scale(1.05); } 40% { transform: translate3d(-11vw, 10vh, 0) scale(.9); } 75% { transform: translate3d(5vw, -8vh, 0) scale(1.18); } }
+@keyframes drift-b { 0%,100% { transform: translate3d(0,0,0) scale(1.05); } 40% { transform: translate3d(-11vw, 10vh, 0) scale(.94); } 75% { transform: translate3d(5vw, -8vh, 0) scale(1.18); } }
 @keyframes drift-c { 0%,100% { transform: translate3d(0,0,0) scale(1); } 50% { transform: translate3d(-14vw, -12vh, 0) scale(1.2); } }
 
 .grain {
@@ -138,7 +138,8 @@ a { color: inherit; }
    ═══════════════════════════════════════════════════════════ */
 .card, .model, .field, .chip, .icon-btn, .avatar, .ghost-btn, .seg,
 .welcome-tag, .dropdown, .news-item, .status, .toast,
-.consensus-card, .scorecard-card, .save-btn {
+.consensus-card, .scorecard-card, .save-btn, .predict-btn,
+.predict-panel {
   background: var(--glass-bg);
   -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat));
   backdrop-filter: blur(var(--blur)) saturate(var(--sat));
@@ -146,11 +147,11 @@ a { color: inherit; }
   box-shadow: inset 0 1px 0 0 var(--glass-hi), inset 0 -1px 0 0 var(--glass-lo), inset 1px 0 0 0 var(--glass-edge), inset -1px 0 0 0 var(--glass-edge), var(--glass-shadow-sm);
   transition: background .5s ease, border-color .5s ease, box-shadow .5s ease, color .4s ease, opacity .4s ease, transform .45s cubic-bezier(.22,1,.36,1);
 }
-.card, .model {
+.card, .model, .predict-panel {
   box-shadow: inset 0 1px 0 0 var(--glass-hi), inset 0 -1px 0 0 var(--glass-lo), inset 1px 0 0 0 var(--glass-edge), inset -1px 0 0 0 var(--glass-edge), var(--glass-shadow);
 }
 @supports (backdrop-filter: url(#lg-soft)) {
-  .card, .model { -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat)); backdrop-filter: blur(var(--blur)) saturate(var(--sat)) url(#lg-soft); }
+  .card, .model, .predict-panel { -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat)); backdrop-filter: blur(var(--blur)) saturate(var(--sat)) url(#lg-soft); }
 }
 
 .spec { position: relative; isolation: isolate; }
@@ -263,7 +264,7 @@ a { color: inherit; }
 .ghost-btn:hover svg { transform: rotate(-180deg); }
 
 /* ═══════════════════════════════════════════════════════════
-   SAVE BUTTON + WATCH BUTTON
+   SAVE BUTTON + WATCH BUTTON + PREDICT BUTTON
    ═══════════════════════════════════════════════════════════ */
 .results-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
@@ -298,8 +299,85 @@ a { color: inherit; }
 .save-btn.saving .icon-bookmark { animation: bookmarkPulse 1.2s ease-in-out infinite; }
 @keyframes bookmarkPulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 
+/* ─── Predict button (primary CTA in header) ─── */
+.predict-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 18px; border-radius: 10px;
+  font-size: 12.5px; font-weight: 700;
+  letter-spacing: -.005em;
+  color: var(--text);
+  transition: .35s cubic-bezier(.22,1,.36,1);
+  white-space: nowrap;
+  position: relative;
+  overflow: hidden;
+}
+.predict-btn::before {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--ok) 18%, transparent),
+    color-mix(in srgb, var(--ok) 6%, transparent));
+  opacity: 0; transition: opacity .35s ease;
+  pointer-events: none;
+}
+.predict-btn:hover:not(:disabled)::before { opacity: 1; }
+.predict-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  transform: translateY(-1px);
+}
+.predict-btn:active:not(:disabled) { transform: scale(.98); }
+.predict-btn svg { width: 13px; height: 13px; flex-shrink: 0; position: relative; z-index: 1; }
+.predict-btn span { position: relative; z-index: 1; }
+.predict-btn:disabled { cursor: default; opacity: .55; }
+.predict-btn.working { color: var(--text-2); }
+.predict-btn.working svg { animation: spin 1s linear infinite; }
+
 /* ═══════════════════════════════════════════════════════════
-   RESULTS GRID — single column, chart on top
+   PREDICT PANEL (pre-prediction prompt card)
+   ═══════════════════════════════════════════════════════════ */
+.predict-panel {
+  display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+  padding: 22px 26px; border-radius: 16px;
+  margin-bottom: 20px;
+  animation: fadeUp .5s cubic-bezier(.22,1,.36,1) both;
+}
+.predict-panel-icon {
+  width: 48px; height: 48px; border-radius: 13px;
+  display: grid; place-items: center;
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+  color: var(--ok);
+  flex-shrink: 0;
+}
+.predict-panel-icon svg { width: 20px; height: 20px; }
+.predict-panel-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.predict-panel-title {
+  font-size: 15px; font-weight: 700; letter-spacing: -.02em;
+  color: var(--text); line-height: 1.25;
+}
+.predict-panel-sub {
+  font-size: 12.5px; color: var(--text-3); line-height: 1.5;
+  letter-spacing: -.003em;
+}
+.predict-panel .predict-btn {
+  padding: 12px 22px;
+  font-size: 13px;
+  border-radius: 11px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: transparent;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 6px 22px rgba(0,0,0,.32);
+}
+.predict-panel .predict-btn::before { display: none; }
+.predict-panel .predict-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 10px 30px rgba(0,0,0,.40);
+  color: var(--accent-fg);
+  border-color: transparent;
+}
+.predict-panel .predict-btn:disabled { opacity: .6; }
+
+/* ═══════════════════════════════════════════════════════════
+   RESULTS GRID
    ═══════════════════════════════════════════════════════════ */
 .results-grid { display: grid; grid-template-columns: 1fr; gap: 20px; align-items: start; }
 
@@ -325,7 +403,7 @@ a { color: inherit; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ═══════════════════════════════════════════════════════════
-   MODELS COLUMN — full width
+   MODELS COLUMN
    ═══════════════════════════════════════════════════════════ */
 .models-column { display: flex; flex-direction: column; gap: 12px; }
 .models-header { display: flex; align-items: baseline; justify-content: space-between; padding: 0 4px 4px; }
@@ -333,9 +411,6 @@ a { color: inherit; }
 .models-header span { font-size: 10.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); }
 .models { display: grid; gap: 12px; }
 
-/* ═══════════════════════════════════════════════════════════
-   MODEL CARD — horizontal rectangle
-   ═══════════════════════════════════════════════════════════ */
 .model {
   border-radius: 18px;
   overflow: hidden;
@@ -375,7 +450,6 @@ a { color: inherit; }
 .sk + .sk { margin-top: 10px; }
 @keyframes shimmer { to { transform: translateX(100%); } }
 
-/* ─── Hero layout: 3-column horizontal rectangle ─── */
 .model-hero {
   display: grid;
   grid-template-columns: 168px 1fr 160px;
@@ -385,7 +459,6 @@ a { color: inherit; }
   animation: fadeUp .5s cubic-bezier(.22,1,.36,1) both;
 }
 
-/* Left: verdict + confidence block */
 .mh-verdict-block {
   display: flex; flex-direction: column; gap: 14px;
   padding-right: 24px;
@@ -421,7 +494,6 @@ a { color: inherit; }
 .mh-conf-fill.bear { background: linear-gradient(90deg, color-mix(in srgb, var(--err) 55%, transparent), var(--err)); }
 .mh-conf-fill.hold { background: var(--text-3); }
 
-/* Middle: headline + bullets */
 .mh-content { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .mh-headline {
   font-size: 15px; font-weight: 600;
@@ -446,7 +518,6 @@ a { color: inherit; }
 .mh-point.good .mh-icon { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
 .mh-point.risk .mh-icon { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
 
-/* XGBoost feature bars inside hero */
 .mh-features { display: flex; flex-direction: column; gap: 8px; }
 .mh-features .feature-viz-head { font-size: 9px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--text-3); display: flex; justify-content: space-between; align-items: baseline; }
 .mh-features .feature-viz-head span:last-child { color: var(--text-4); letter-spacing: .06em; }
@@ -467,7 +538,6 @@ a { color: inherit; }
 .feature-val.pos { color: var(--ok); }
 .feature-val.neg { color: var(--err); }
 
-/* Details toggle */
 .mh-details-toggle {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 6px 11px; border-radius: 8px;
@@ -495,7 +565,6 @@ a { color: inherit; }
   white-space: pre-wrap; word-break: break-word;
 }
 
-/* Right: price + extra */
 .mh-side { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; padding-left: 24px; border-left: 1px solid var(--line); height: 100%; }
 .mh-price { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; text-align: right; }
 .mh-price b { font-size: 24px; font-weight: 800; letter-spacing: -.035em; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1; }
@@ -749,6 +818,10 @@ a { color: inherit; }
   .save-btn, .ghost-btn { flex: 1; justify-content: center; }
   .blob { filter: blur(48px); }
 
+  .predict-panel { padding: 18px; gap: 14px; }
+  .predict-panel-icon { width: 44px; height: 44px; }
+  .predict-panel .predict-btn { width: 100%; justify-content: center; }
+
   .model-hero { grid-template-columns: 1fr; gap: 16px; padding: 18px; }
   .mh-verdict-block { flex-direction: row; align-items: center; justify-content: space-between; padding-right: 0; padding-bottom: 14px; border-right: none; border-bottom: 1px solid var(--line); }
   .mh-side { grid-column: auto; border-left: none; padding-left: 0; padding-top: 0; border-top: none; align-items: flex-start; }
@@ -851,9 +924,8 @@ a { color: inherit; }
     <div class="welcome-tag spec">3 engines online</div>
     <h1>Read the market<br><span>before it moves.</span></h1>
     <p>
-      Type any ticker into the search bar above. In seconds you'll get a price chart,
-      technical signals, and forecast verdicts from XGBoost plus a local Qwen model
-      running on your own machine.
+      Type any ticker into the search bar above. You'll get the price chart and latest news first —
+      then run the forecast whenever you're ready.
     </p>
     <div class="chips" id="chips"></div>
   </section>
@@ -863,7 +935,7 @@ a { color: inherit; }
       <div class="ticker-block">
         <div class="ticker-live"></div>
         <div class="ticker-meta">
-          <span class="label">Now analyzing</span>
+          <span class="label">Now viewing</span>
           <span class="symbol" id="resultTicker">—</span>
         </div>
       </div>
@@ -898,6 +970,25 @@ a { color: inherit; }
 
     <div class="results-grid">
 
+      <!-- ═══════════ PREDICT PANEL (only shows before prediction runs) ═══════════ -->
+      <div class="predict-panel spec" id="predictPanel" style="display:none;">
+        <div class="predict-panel-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>
+          </svg>
+        </div>
+        <div class="predict-panel-text">
+          <div class="predict-panel-title">Chart & news loaded — ready to forecast</div>
+          <div class="predict-panel-sub">Run XGBoost, Qwen, and Groq predictions on <span id="predictPanelTicker" style="font-weight:700;color:var(--text-2);">—</span>. This usually takes 10–30 seconds.</div>
+        </div>
+        <button class="predict-btn" id="predictBtn" title="Run AI predictions">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 3l14 9-14 9V3z"/>
+          </svg>
+          <span id="predictBtnLabel">Run prediction</span>
+        </button>
+      </div>
+
       <!-- ═══════════ CONSENSUS CARD ═══════════ -->
       <div class="consensus-card spec" id="consensusCard" style="display:none;">
         <div class="consensus-left">
@@ -925,7 +1016,7 @@ a { color: inherit; }
         </div>
       </div>
 
-      <!-- ═══════════ CHART (top, full width) ═══════════ -->
+      <!-- ═══════════ CHART ═══════════ -->
       <div>
         <div class="card chart-card spec" id="chartCard">
           <div class="chart-head">
@@ -963,8 +1054,8 @@ a { color: inherit; }
         </div>
       </div>
 
-      <!-- ═══════════ MODEL CARDS (full-width horizontal) ═══════════ -->
-      <div class="models-column">
+      <!-- ═══════════ MODEL CARDS (hidden until prediction runs) ═══════════ -->
+      <div class="models-column" id="modelsColumn" style="display:none;">
         <div class="models-header">
           <h2>Model forecast</h2>
           <span id="modelCount">3 sources</span>
@@ -1030,6 +1121,7 @@ a { color: inherit; }
     analysisData: {},
     currentHistoryId: null,
     isFromHistory: false,
+    predictionRun: false,
     theme: 'dark', tickers: [], ticker: null, chart: null, candleSeries: null, areaSeries: null,
     chartType: 'candles', rawData: [], activeIndex: -1, filtered: []
   };
@@ -1039,9 +1131,13 @@ a { color: inherit; }
     welcome: $('#welcome'), results: $('#results'), searchInput: $('#searchInput'), dropdown: $('#dropdown'), searchWrap: $('#searchWrap'),
     chips: $('#chips'), themeToggle: $('#themeToggle'), resetBtn: $('#resetBtn'), resultTicker: $('#resultTicker'), chartCard: $('#chartCard'),
     chartEl: $('#chartContainer'), chartOverlayText: $('#chartOverlayText'), modelsEl: $('#modelsContainer'), modelCount: $('#modelCount'),
+    modelsColumn: $('#modelsColumn'),
     toasts: $('#toasts'), legend: { o: $('#lgO'), h: $('#lgH'), l: $('#lgL'), c: $('#lgC') }, newsEl: $('#newsContainer'),
     menuToggle: $('#menuToggle'), menuDropdown: $('#menuDropdown'),
-    saveBtn: $('#saveHistoryBtn'), saveBtnLabel: $('#saveBtnLabel')
+    saveBtn: $('#saveHistoryBtn'), saveBtnLabel: $('#saveBtnLabel'),
+    predictPanel: $('#predictPanel'), predictBtn: $('#predictBtn'), predictBtnLabel: $('#predictBtnLabel'),
+    predictPanelTicker: $('#predictPanelTicker'),
+    consensusCard: $('#consensusCard')
   };
 
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1109,7 +1205,7 @@ a { color: inherit; }
     el.chips.innerHTML = '';
     list.forEach(t => {
       const b = document.createElement('button'); b.className = 'chip spec'; b.type = 'button'; b.textContent = t;
-      b.addEventListener('click', () => { el.searchInput.value = t; closeDropdown(); runAnalysis(); }); el.chips.appendChild(b);
+      b.addEventListener('click', () => { el.searchInput.value = t; closeDropdown(); loadTicker(t); }); el.chips.appendChild(b);
     });
   }
 
@@ -1142,7 +1238,7 @@ a { color: inherit; }
     state.activeIndex = i; if (i >= 0 && items[i]) items[i].classList.add('active');
   }
 
-  function chooseTicker(ticker) { el.searchInput.value = ticker; closeDropdown(); el.searchInput.blur(); runAnalysis(); }
+  function chooseTicker(ticker) { el.searchInput.value = ticker; closeDropdown(); el.searchInput.blur(); loadTicker(ticker); }
 
   el.searchInput.addEventListener('input', e => { renderDropdown(e.target.value.trim().toUpperCase()); });
   el.searchInput.addEventListener('focus', () => { const q = el.searchInput.value.trim().toUpperCase(); if (q) renderDropdown(q); });
@@ -1153,13 +1249,126 @@ a { color: inherit; }
     else if (e.key === 'Enter') {
       e.preventDefault();
       if (isOpen && state.activeIndex >= 0 && items[state.activeIndex]) { chooseTicker(items[state.activeIndex]); }
-      else if (isOpen && items.length === 1) { chooseTicker(items[0]); } else { closeDropdown(); runAnalysis(); }
+      else if (isOpen && items.length === 1) { chooseTicker(items[0]); } else { closeDropdown(); loadTicker(el.searchInput.value.trim().toUpperCase()); }
     } else if (e.key === 'Escape') { closeDropdown(); el.searchInput.blur(); }
   });
 
   document.addEventListener('click', e => { if (!el.searchWrap.contains(e.target)) closeDropdown(); });
   document.addEventListener('keydown', e => { if (e.key === '/' && document.activeElement !== el.searchInput) { e.preventDefault(); el.searchInput.focus(); el.searchInput.select(); } });
   el.resetBtn.addEventListener('click', resetAnalysis);
+
+  /* ═══════════════════════════════════════════════════════════
+     LOAD TICKER (no prediction — just chart + news + predict panel)
+     ═══════════════════════════════════════════════════════════ */
+
+  function loadTicker(ticker) {
+    if (!ticker) {
+      el.searchWrap.animate([{ transform: 'translateX(0)' }, { transform: 'translateX(-5px)' }, { transform: 'translateX(5px)' }, { transform: 'translateX(0)' }], { duration: 260, easing: 'ease-in-out' });
+      el.searchInput.focus(); return;
+    }
+    state.ticker = ticker;
+    state.currentHistoryId = null;
+    state.isFromHistory = false;
+    state.predictionRun = false;
+    state.analysisData = {};
+
+    el.welcome.style.display = 'none';
+    el.results.classList.add('visible');
+    el.resultTicker.textContent = ticker;
+
+    // Reset prediction-related UI
+    resetSaveButton();
+    hideConsensus();
+    hideModels();
+    showPredictPanel(ticker);
+
+    // Load chart + news
+    loadChart(ticker);
+    loadNews(ticker);
+
+    // Scroll to top
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function resetAnalysis() {
+    el.results.classList.remove('visible');
+    el.welcome.style.display = '';
+    el.modelsEl.innerHTML = '';
+    el.newsEl.innerHTML = '';
+    el.searchInput.value = '';
+    el.searchInput.focus();
+    state.analysisData = {};
+    state.currentHistoryId = null;
+    state.isFromHistory = false;
+    state.predictionRun = false;
+    resetSaveButton();
+    hidePredictPanel();
+    hideConsensus();
+    hideModels();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     PREDICT PANEL CONTROLS
+     ═══════════════════════════════════════════════════════════ */
+
+  function showPredictPanel(ticker) {
+    el.predictPanel.style.display = 'flex';
+    el.predictPanelTicker.textContent = ticker;
+    el.predictBtn.disabled = false;
+    el.predictBtn.classList.remove('working');
+    el.predictBtnLabel.textContent = 'Run prediction';
+  }
+
+  function hidePredictPanel() {
+    el.predictPanel.style.display = 'none';
+  }
+
+  function setPredictBtnWorking(working) {
+    el.predictBtn.disabled = working;
+    el.predictBtn.classList.toggle('working', working);
+    el.predictBtnLabel.textContent = working ? 'Predicting…' : 'Run prediction';
+  }
+
+  function hideConsensus() {
+    el.consensusCard.style.display = 'none';
+  }
+
+  function hideModels() {
+    el.modelsColumn.style.display = 'none';
+    el.modelsEl.innerHTML = '';
+  }
+
+  el.predictBtn.addEventListener('click', () => {
+    if (state.predictionRun) return;
+    runPredictions();
+  });
+
+  async function runPredictions() {
+    const ticker = state.ticker;
+    if (!ticker) return;
+
+    state.predictionRun = true;
+    setPredictBtnWorking(true);
+    hidePredictPanel();
+
+    // Show models column with loading skeletons
+    el.modelsColumn.style.display = '';
+    renderModelCards();
+
+    // Run all three predictions in parallel
+    await launchPredictions(ticker);
+
+    // After all done, render consensus + show save button
+    renderConsensus();
+
+    const lastClose = state.rawData.length ? state.rawData[state.rawData.length - 1].close : null;
+    if (lastClose) logPrediction(ticker, lastClose, state.analysisData);
+    refreshScorecard();
+
+    if (Object.keys(state.analysisData).length) showSaveButton();
+    else resetSaveButton();
+  }
 
   /* ═══════════════════════════════════════════════════════════
      SAVE-TO-HISTORY
@@ -1206,6 +1415,7 @@ a { color: inherit; }
     const payload = {
       ticker: ticker,
       time: new Date().toISOString(),
+      price: state.rawData.length ? state.rawData[state.rawData.length - 1].close : null,
       models: Object.keys(state.analysisData),
       predictions: state.analysisData
     };
@@ -1231,7 +1441,7 @@ a { color: inherit; }
   el.saveBtn.addEventListener('click', handleSaveHistory);
 
   /* ═══════════════════════════════════════════════════════════
-     MODEL CARDS — horizontal rectangles
+     MODEL CARDS
      ═══════════════════════════════════════════════════════════ */
 
   function renderModelCards() {
@@ -1374,7 +1584,6 @@ a { color: inherit; }
     let points = Array.isArray(data.keyPoints) ? data.keyPoints.slice(0, 4) : null;
     let risks = Array.isArray(data.risks) ? data.risks.slice(0, 2) : null;
 
-    // Fallback: derive bullets from sentences
     if (!points) {
       const sentences = splitIntoSentences(text);
       if (sentences.length >= 2) {
@@ -1436,7 +1645,6 @@ a { color: inherit; }
       </div>
     `;
 
-    // Wire details toggle
     const toggleBtn = heroEl.querySelector('[data-toggle-details]');
     const detailsEl = heroEl.querySelector('.mh-details');
     if (toggleBtn && detailsEl) {
@@ -1477,90 +1685,6 @@ a { color: inherit; }
   async function launchPredictions(ticker) {
     state.analysisData = {};
     await Promise.all(MODELS.map(m => fetchPrediction(m, ticker)));
-  }
-
-  async function loadHistoryEntry(id) {
-    try {
-      const res = await fetch('/api/history');
-      const data = await res.json();
-      const entry = data.find(item => item.id === id);
-      if (!entry) { toast('History not found', 'err'); return; }
-
-      state.ticker = entry.ticker;
-      state.currentHistoryId = entry.id;
-      state.isFromHistory = true;
-
-      el.welcome.style.display = 'none';
-      el.results.classList.add('visible');
-      el.resultTicker.textContent = entry.ticker;
-      markSaveButtonAsSaved();
-
-      renderModelCards();
-      loadChart(entry.ticker);
-      loadNews(entry.ticker);
-
-      if (entry.predictions && Object.keys(entry.predictions).length > 0) {
-        Object.keys(entry.predictions).forEach(modelId => {
-          const p = entry.predictions[modelId];
-          state.analysisData[modelId] = {
-            text: p.text,
-            verdict: p.verdict || detectDirection(p.text),
-            confidence: (typeof p.confidence === 'number') ? p.confidence : estimateConfidence(p.text),
-            features: p.features || null,
-            headline: p.headline || null,
-            keyPoints: p.keyPoints || null,
-            risks: p.risks || null,
-          };
-          setModelStatus(modelId, 'done', 'Ready', false);
-          setModelContent(modelId, p.text, false);
-        });
-        renderConsensus();
-      } else {
-        MODELS.forEach(m => {
-          setModelStatus(m.id, 'error', 'No Data', false);
-          setModelContent(m.id, 'Prediction data was not saved for this old history entry.', true);
-        });
-      }
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    } catch (e) {
-      console.error(e);
-      toast('Could not load history entry', 'err');
-    }
-  }
-
-  function runAnalysis() {
-    const ticker = el.searchInput.value.trim().toUpperCase();
-    if (!ticker) {
-      el.searchWrap.animate([{ transform: 'translateX(0)' }, { transform: 'translateX(-5px)' }, { transform: 'translateX(5px)' }, { transform: 'translateX(0)' }], { duration: 260, easing: 'ease-in-out' });
-      el.searchInput.focus(); return;
-    }
-    state.ticker = ticker;
-    state.currentHistoryId = null;
-    state.isFromHistory = false;
-    el.welcome.style.display = 'none';
-    el.results.classList.add('visible');
-    el.resultTicker.textContent = ticker;
-    resetSaveButton();
-
-    renderModelCards();
-    loadChart(ticker);
-    launchPredictions(ticker);
-    loadNews(ticker);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-
-  function resetAnalysis() {
-    el.results.classList.remove('visible');
-    el.welcome.style.display = '';
-    el.modelsEl.innerHTML = '';
-    el.newsEl.innerHTML = '';
-    el.searchInput.value = '';
-    el.searchInput.focus();
-    state.analysisData = {};
-    state.currentHistoryId = null;
-    state.isFromHistory = false;
-    resetSaveButton();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   function pal() { return CHART_PALETTES[state.theme] || CHART_PALETTES.dark; }
@@ -1619,6 +1743,7 @@ a { color: inherit; }
       if (result.error || !result.data || !result.data.length) { el.chartOverlayText.textContent = result.error || 'No price data available'; el.chartCard.classList.add('error'); return; }
       state.rawData = result.data; if (!state.chart) makeChart(); else buildSeries();
       applyChartData(); el.chartCard.classList.remove('loading', 'error');
+      if (state.rawData.length) applyIndicators();
     } catch (err) { el.chartOverlayText.textContent = 'Could not load chart data'; el.chartCard.classList.add('error'); toast('Could not load chart data', 'err'); }
   }
 
@@ -1685,11 +1810,9 @@ a { color: inherit; }
   }
 
   function renderConsensus() {
-    const card = $('#consensusCard');
-    if (!card) return;
     const c = computeConsensus();
-    if (!c) { card.style.display = 'none'; return; }
-    card.style.display = '';
+    if (!c) { hideConsensus(); return; }
+    el.consensusCard.style.display = '';
     const v = $('#consensusVerdict');
     v.textContent = c.verdict;
     v.className = 'consensus-verdict ' + c.cls;
@@ -2188,39 +2311,6 @@ a { color: inherit; }
   }
 
   /* ═══════════════════════════════════════════════════════════
-     WRAPPERS — extend originals
-     ═══════════════════════════════════════════════════════════ */
-
-  const _origFetchPrediction = fetchPrediction;
-  fetchPrediction = async function (model, ticker) {
-    await _origFetchPrediction.call(this, model, ticker);
-    renderConsensus();
-  };
-
-  const _origLaunchPredictions = launchPredictions;
-  launchPredictions = async function (ticker) {
-    await _origLaunchPredictions.call(this, ticker);
-    renderConsensus();
-    const lastClose = state.rawData.length ? state.rawData[state.rawData.length - 1].close : null;
-    if (lastClose) logPrediction(ticker, lastClose, state.analysisData);
-    refreshScorecard();
-    if (Object.keys(state.analysisData).length) showSaveButton();
-    else resetSaveButton();
-  };
-
-  const _origLoadChart = loadChart;
-  loadChart = async function (ticker) {
-    await _origLoadChart.call(this, ticker);
-    if (state.rawData.length) applyIndicators();
-  };
-
-  const _origSetTheme = setTheme;
-  setTheme = function (name) {
-    _origSetTheme.call(this, name);
-    if (state.chart && state.rawData.length) applyIndicators();
-  };
-
-  /* ═══════════════════════════════════════════════════════════
      WATCHLIST BUTTON
      ═══════════════════════════════════════════════════════════ */
   const watchBtn = $('#watchlistBtn');
@@ -2266,14 +2356,24 @@ a { color: inherit; }
       }
     });
 
-    const _origRunAnalysis = runAnalysis;
-    runAnalysis = function () {
-      _origRunAnalysis.apply(this, arguments);
-      updateWatchBtn(state.ticker);
-    };
-
     loadWatchlistCache();
   }
+
+  /* ═══════════════════════════════════════════════════════════
+     WRAPPERS — extend loadTicker to update watch button
+     ═══════════════════════════════════════════════════════════ */
+
+  const _origLoadTicker = loadTicker;
+  loadTicker = function (ticker) {
+    _origLoadTicker.call(this, ticker);
+    updateWatchBtn(state.ticker);
+  };
+
+  const _origSetTheme = setTheme;
+  setTheme = function (name) {
+    _origSetTheme.call(this, name);
+    if (state.chart && state.rawData.length) applyIndicators();
+  };
 
   /* ═══════════════════════════════════════════════════════════
      BOOT
@@ -2282,13 +2382,10 @@ a { color: inherit; }
   refreshScorecard();
 
   const urlParams = new URLSearchParams(window.location.search);
-  const histId = urlParams.get('history_id');
   const qTicker = urlParams.get('q');
-  if (histId) {
-    loadHistoryEntry(histId);
-  } else if (qTicker) {
+  if (qTicker) {
     el.searchInput.value = qTicker.toUpperCase();
-    runAnalysis();
+    loadTicker(qTicker.toUpperCase());
   } else {
     resetSaveButton();
   }
