@@ -14,9 +14,6 @@ __pycache__/
 sp500_processed_data.csv
 aapl_processed_data.csv
 
-# Trained models
-xgboost_model.pkl
-
 # Runtime data
 history.json
 history.json.tmp
