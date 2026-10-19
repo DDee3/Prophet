@@ -1,0 +1,7 @@
+Flask
+gunicorn
+pandas
+xgboost
+requests
+groq
+openai
